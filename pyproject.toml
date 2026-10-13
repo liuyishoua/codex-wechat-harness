@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-wechat-harness"
-version = "0.2.0"
+version = "0.2.1"
 description = "Connect Hermes WeChat to an existing Codex App Server with durable text, image and question routing."
 readme = "README.md"
 requires-python = ">=3.11"

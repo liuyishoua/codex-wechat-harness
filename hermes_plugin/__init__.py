@@ -1,4 +1,5 @@
 """Hermes transports WeChat; the bridge selects the Codex conversation."""
+import asyncio
 import json
 import os
 import re
@@ -22,13 +23,37 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
     media = list(getattr(event, 'media_urls', None) or [])
     types = list(getattr(event, 'media_types', None) or [])
     images = [path for n, path in enumerate(media) if n < len(types) and types[n].startswith('image/')]
-    if config.get('chat_enabled', False) and media and len(images) != len(media):
+    kind = getattr(getattr(event, 'message_type', None), 'value', getattr(event, 'message_type', None))
+    audio = [path for n, path in enumerate(media)
+             if (n < len(types) and types[n].startswith('audio/'))
+             or (n >= len(types) and kind == 'voice')]
+    text = event.text or ''
+    if config.get('chat_enabled', False) and media and len(images) + len(audio) != len(media):
         adapter=gateway._intake_adapter_for(source)
         if adapter:
-            try: await adapter.send(source.chat_id,'Codex 微信入口支持文字和图片；其他附件请在 Codex 桌面发送。')
+            try: await adapter.send(source.chat_id,'Codex 微信入口支持文字、图片和语音；其他附件请在 Codex 桌面发送。')
             except Exception: pass
         return {'action':'skip','reason':'codex-wechat-chat-unsupported-media'}
-    if images or not COMMAND.match(event.text or ''):
+    if config.get('chat_enabled', False) and audio:
+        adapter = gateway._intake_adapter_for(source)
+        try:
+            # The hook runs before Hermes' normal STT stage. Reuse its configured
+            # provider, local fallback and per-event transcription cache here.
+            transcribe = getattr(gateway, '_transcribe_pending_audio_event_once', None)
+            if not transcribe:
+                raise RuntimeError('Hermes transcription hook unavailable')
+            _, transcripts = await asyncio.wait_for(transcribe(event), timeout=180)
+            if len(transcripts) != len(set(audio)) or not all(isinstance(t, str) and t.strip() for t in transcripts):
+                raise ValueError('Voice transcription incomplete')
+            parts = ([text.strip()] if text.strip() else []) + [t.strip() for t in transcripts]
+            text = '\n\n'.join(parts)
+        except Exception:
+            # Never submit an inaudible/partial command or execute via Hermes.
+            if adapter:
+                try: await adapter.send(source.chat_id, '语音已收到，但暂时没能完整识别；请重发语音或改用文字。')
+                except Exception: pass
+            return {'action':'skip', 'reason':'codex-wechat-chat-transcription-failed'}
+    if images or not COMMAND.match(text):
         try:
             async with aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(data_dir()/'bridge.sock')),timeout=aiohttp.ClientTimeout(total=8 if images else 1)) as session:
                 async with session.post('http://localhost/channel-ready',json={'platform':'weixin','chat_id':source.chat_id,'user_id':source.user_id}) as response:
@@ -36,7 +61,7 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
                 if config.get('chat_enabled', False):
                     async with session.post('http://localhost/messages', json={'platform':'weixin',
                             'chat_id':source.chat_id,'user_id':source.user_id,
-                            'message_id':str(event.message_id or ''),'text':event.text or '', 'images':images}) as response:
+                            'message_id':str(event.message_id or ''),'text':text, 'images':images}) as response:
                         if response.status >= 400:
                             raise RuntimeError('Codex 消息入口拒绝请求')
                         result = await response.json()
@@ -55,7 +80,7 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
         async with aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(data_dir()/'bridge.sock')),
                 timeout=aiohttp.ClientTimeout(total=8)) as session:
             async with session.post('http://localhost/replies',json={'platform':'weixin',
-                    'chat_id':source.chat_id,'user_id':source.user_id,'message_id':str(event.message_id or ''),'text':event.text}) as response:
+                    'chat_id':source.chat_id,'user_id':source.user_id,'message_id':str(event.message_id or ''),'text':text}) as response:
                 result=await response.json()
                 message=result.get('message') or result.get('error') or '回复未被接收，请查看 Codex。'
     except Exception:
