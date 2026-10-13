@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-wechat-harness"
+version = "0.2.0"
+description = "Connect Hermes WeChat to an existing Codex App Server with durable text, image and question routing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["aiohttp>=3.10,<4", "Pillow>=11,<13"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+codex-wechat = "harness.cli:main"
+codex-wechat-setup = "harness.setup:main"
+
+[project.urls]
+Repository = "https://github.com/liuyishoua/codex-wechat-harness"
+
+[tool.setuptools.packages.find]
+include = ["harness*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

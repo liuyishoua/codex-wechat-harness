@@ -1,0 +1,18 @@
+# Example user service. Prefer python -m harness.setup to generate absolute paths.
+# Replace every /absolute/path placeholder before installing.
+[Unit]
+Description=Codex Hermes WeChat bridge
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/codex-wechat-harness
+Environment=PYTHONPATH=/absolute/path/to/codex-wechat-harness:/absolute/path/to/hermes-agent
+Environment=CODEX_WECHAT_HOME=/absolute/path/to/codex-wechat-harness/.local
+ExecStart=/absolute/path/to/hermes-agent/venv/bin/python -m harness.service
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

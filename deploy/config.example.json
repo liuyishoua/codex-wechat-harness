@@ -1,0 +1,9 @@
+{
+  "chat_id": "YOUR_BOUND_WECHAT_CHAT_ID",
+  "allowed_users": ["YOUR_WECHAT_USER_ID"],
+  "codex_socket": "/absolute/path/to/codex-control.sock",
+  "project_cwd": "/absolute/path/to/your/project",
+  "chat_enabled": true,
+  "thread_ids": [],
+  "codex_state_db": null
+}

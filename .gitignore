@@ -1,0 +1,16 @@
+.local/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+*.sqlite*
+*.db
+*.log
+*.sock
+.DS_Store
