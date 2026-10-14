@@ -9,7 +9,7 @@ description = "Connect Hermes WeChat to an existing Codex App Server with durabl
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-dependencies = ["aiohttp>=3.10,<4", "Pillow>=11,<13"]
+dependencies = ["aiohttp>=3.10,<4", "Pillow>=11,<13", "opencc-python-reimplemented>=0.1.7,<0.2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

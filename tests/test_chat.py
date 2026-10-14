@@ -127,7 +127,7 @@ def test_disconnected_plain_chat_is_consumed_without_hermes_fallback(tmp_path):
 def test_named_sessions_keep_context_and_deduplicate(tmp_path):
     async def check():
         b, c, sent = setup(tmp_path)
-        await message(b, '新建任务 微信接入', 'new1')
+        await message(b, '新建会话 微信接入', 'new1')
         first = b.chat.current()['thread_id']
         await message(b, '实现消息分流', 'task1')
         await message(b, '补充一个要求', 'task2')
@@ -181,6 +181,7 @@ def test_results_label_old_session_and_send_once(tmp_path):
                  'turn': {'id': 'turn-1', 'status': 'completed'}}}
         await b.event(event)
         await b.event(event)
+        await drain(b)
         assert sent.count('「原任务」\n\n已完成') == 1
         assert b.chat.current()['name'] == '另一任务'
     asyncio.run(check())
@@ -201,6 +202,7 @@ def test_restart_restores_selection_and_avoids_replaying_unknown_writes(tmp_path
         c.turns[b.chat.current()['thread_id']][0].update(status='completed', items=[
             {'type': 'agentMessage', 'text': '重连后的结果', 'phase': 'final_answer'}])
         await restored.chat.poll()
+        await drain(restored)
         assert sent.count('「原任务」\n\n重连后的结果') == 1
         assert '危险重发' not in sent
         assert not any(p.get('input', [{}])[0].get('text') == '危险重放' for m, p in c.calls)
@@ -295,6 +297,42 @@ def test_number_switch_requires_list_and_rejects_unavailable_target(tmp_path):
     asyncio.run(check())
 
 
+def test_number_switch_rejects_old_list_or_newly_created_thread(tmp_path):
+    async def check():
+        b,c,sent=setup(tmp_path)
+        c.threads={'one':{'id':'one','name':'旧任务','cwd':b.chat.cwd}}
+        await message(b,'会话列表','old-list')
+        with b.store.db() as db:
+            db.execute('UPDATE chat_outbox SET created=created-601 WHERE key=?',('ack:old-list',))
+        await message(b,'切换 1','stale-switch')
+        assert b.chat.current() is None and '旧列表已失效' in sent[-1]
+        await message(b,'会话列表','fresh-list')
+        c.threads['new']={'id':'new','name':'自动登录','cwd':b.chat.cwd,'updatedAt':999}
+        await message(b,'切换 1','changed-switch')
+        assert b.chat.current() is None and '旧列表已失效' in sent[-1]
+        await message(b,'会话列表','updated-list')
+        await message(b,'切换 1','correct-switch')
+        assert b.chat.current()['thread_id']=='new'
+    asyncio.run(check())
+
+
+def test_number_switch_pins_received_list_before_new_list_delivery(tmp_path):
+    async def check():
+        b,c,sent=setup(tmp_path)
+        c.threads={'one':{'id':'one','name':'第一任务','cwd':b.chat.cwd,'updatedAt':2},
+                   'two':{'id':'two','name':'第二任务','cwd':b.chat.cwd,'updatedAt':1}}
+        await message(b,'会话列表','first-list')
+        async with b.chat.lock:
+            await b.chat.accept({'platform':'weixin','chat_id':'owner','user_id':'owner',
+                                'message_id':'numeric','text':'切换 1'})
+            c.threads['two']['updatedAt']=99
+            await b.chat.execute({'message_id':'second-list','content':'会话列表','created':0})
+            await b.chat.flush()
+        await drain(b)
+        assert b.chat.current()['thread_id']=='one'
+    asyncio.run(check())
+
+
 def test_unsent_list_does_not_replace_numbers_user_already_received(tmp_path):
     async def check():
         b, c, sent = setup(tmp_path)
@@ -344,4 +382,56 @@ def test_plugin_routes_help_and_plain_text_over_real_unix_socket(tmp_path, monke
             assert any(m == 'turn/start' for m, p in c.calls)
         finally:
             await runner.cleanup()
+    asyncio.run(check())
+
+
+def test_slow_notification_does_not_block_completed_or_new_input(tmp_path):
+    async def check():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def sender(chat_id, text):
+            started.set()
+            await release.wait()
+            return 'receipt'
+        b, c, _ = setup(tmp_path, sender)
+        await b.chat.accept({'platform': 'weixin', 'chat_id': 'owner', 'user_id': 'owner',
+                             'text': '新建任务 原会话', 'message_id': 'first'})
+        await asyncio.wait_for(started.wait(), 1)
+        thread_id = b.chat.current()['thread_id']
+        completion = {'id': 'finished', 'status': 'completed', 'items': [
+            {'type': 'agentMessage', 'text': '已完成', 'phase': 'final_answer'}]}
+        await asyncio.wait_for(b.chat.completed(b.chat.current(), completion), .5)
+        task = b.chat.flush_task
+        for _ in range(5):
+            assert b.chat.schedule_flush() is task
+        await b.chat.accept({'platform': 'weixin', 'chat_id': 'owner', 'user_id': 'owner',
+                             'text': '继续下一步', 'message_id': 'second'})
+        await asyncio.wait_for(b.chat.work(), .5)
+        assert any(m == 'turn/start' and p['threadId'] == thread_id for m, p in c.calls)
+        with b.store.db() as db:
+            assert db.execute("SELECT state FROM chat_outbox WHERE key=?",
+                              ('result:' + thread_id + ':finished',)).fetchone()['state'] == 'queued'
+        release.set()
+        await drain(b)
+        with b.store.db() as db:
+            assert db.execute("SELECT state FROM chat_outbox WHERE key=?",
+                              ('result:' + thread_id + ':finished',)).fetchone()['state'] == 'sent'
+    asyncio.run(check())
+
+
+def test_notification_timeout_is_uncertain_and_not_replayed(tmp_path):
+    async def check():
+        calls = []
+        async def sender(chat_id, text):
+            calls.append(text)
+            await asyncio.Event().wait()
+        b, c, _ = setup(tmp_path, sender)
+        b.config = {**b.config, 'notification_timeout': .03}
+        b.chat.enqueue('bounded-send', '通知')
+        b.chat.schedule_flush()
+        await asyncio.wait_for(drain(b), 1)
+        with b.store.db() as db:
+            assert db.execute("SELECT state FROM chat_outbox WHERE key='bounded-send'").fetchone()['state'] == 'uncertain'
+        b.chat.schedule_flush()
+        await drain(b)
+        assert calls == ['通知']
     asyncio.run(check())

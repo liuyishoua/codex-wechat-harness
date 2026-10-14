@@ -19,7 +19,8 @@ class Codex:
         self.ws = self.session = self.reader = None
 
     async def connect(self):
-        self.session = aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(self.path)))
+        self.session = aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(self.path)),
+                                             timeout=aiohttp.ClientTimeout(total=20))
         self.ws = await self.session.ws_connect('http://localhost/', max_msg_size=64*1024*1024, heartbeat=20)
         self.reader = asyncio.create_task(self.read())
         await self.rpc('initialize', {'clientInfo': {'name': 'codex_wechat_harness', 'version': '0.1.0'},

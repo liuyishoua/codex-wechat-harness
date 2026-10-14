@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex Windows control socket over authenticated SSH proxy
+Wants=network-online.target
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/leo-project/codex-wechat
+Environment=CODEX_WECHAT_HOME=/home/ubuntu/leo-project/codex-wechat/.local
+ExecStart=/home/ubuntu/.hermes/hermes-agent/venv/bin/python -m harness.ssh_proxy --host windows
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

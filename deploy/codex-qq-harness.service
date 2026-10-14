@@ -1,0 +1,19 @@
+[Unit]
+Description=Codex Hermes QQ conversation bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/leo-project/codex-wechat
+Environment=PYTHONPATH=/home/ubuntu/leo-project/codex-wechat:/home/ubuntu/.hermes/hermes-agent
+Environment=CODEX_WECHAT_HOME=/home/ubuntu/leo-project/codex-wechat/.local/channels/qqbot
+ExecStart=/home/ubuntu/.hermes/hermes-agent/venv/bin/python -m harness.service
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

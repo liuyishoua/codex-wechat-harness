@@ -102,6 +102,7 @@ def test_result_image_and_native_generation_send_once(tmp_path):
             {'type': 'imageGeneration', 'savedPath': path}]}
         await b.chat.completed(session, turn)
         await b.chat.completed(session, turn)
+        await drain(b)
         images = [p for p in sent if isinstance(p, dict)]
         assert len(images) == 1
         assert Path(images[0]['image']).read_bytes() == Path(path).read_bytes()
@@ -153,7 +154,8 @@ def test_manual_image_endpoint_deduplicates(tmp_path):
                 for _ in range(2):
                     async with client.post('http://localhost/images', json=payload) as response:
                         assert response.status == 200
-                        assert (await response.json())['state'] == 'sent'
+                        assert (await response.json())['state'] in ('queued', 'sending', 'sent')
+                    await drain(b)
                 payload['path'] = photo(tmp_path, 'red')
                 async with client.post('http://localhost/images', json=payload) as response:
                     assert response.status == 409

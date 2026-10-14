@@ -37,7 +37,7 @@ def test_voice_reuses_hermes_stt_and_reaches_codex_start_and_steer(tmp_path, mon
         calls = []
         async def transcribe(e):
             calls.append(e)
-            return '"帮我检查项目"', ['帮我检查项目']
+            return '"帮我检查项目"', ['幫我檢查項目']
         gateway = SimpleNamespace(_is_user_authorized_for_source=lambda s: True,
                                   _intake_adapter_for=lambda s: None,
                                   _transcribe_pending_audio_event_once=transcribe)

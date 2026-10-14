@@ -1,0 +1,18 @@
+[Unit]
+Description=Codex Mac mini control socket over Tailscale SSH
+Wants=network-online.target
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/ssh -NT -L /home/ubuntu/leo-project/codex-wechat/.local/hosts/mac-mini/control.sock:/Users/leo/.codex/app-server-control/app-server-control.sock -i /home/ubuntu/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 leo@100.117.21.117
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

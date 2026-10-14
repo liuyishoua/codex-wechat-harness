@@ -99,6 +99,10 @@ codex app-server --listen "unix://$HOME/.codex/wechat-control.sock"
 
 把该路径传给 `--codex-socket`。新启动的 App Server 是否可直接续接某个桌面会话，取决于宿主和 Codex 版本；不要把桥接健康状态当作所有桌面任务都可控制的证明。
 
+支持原生项目 RPC 的主机可以配置 `desktop_project_sync: true`。桥接通过 `project/list` 找到默认目录对应的项目；没有项目时用固定幂等键创建项目。新会话的 `thread/start` 带上 `projectId`，续接的旧会话若尚未归属项目且目录一致，通过 `thread/metadata/update` 补关联。已有项目归属、临时会话和其他目录的会话不会改动；多个项目包含同一目录时不自动选择。微信、QQ 共用主机上的原生项目。桌面仍需刷新项目或会话列表；项目关联本身不保证两个独立 App Server 的实时消息同步。
+
+2026-10-14 已核验 MacBook、Mac mini、Windows 的项目 RPC，并启用微信和 QQ 的上述配置。补关联了 MacBook 的 2 个桥接会话、Mac mini 的 1 个桥接会话；Windows 当前没有桥接管理的会话，沿用已有项目。变更回执保存在私有 `.local/desktop-project-backfill-1791955782.json`，记录变更前的项目归属，可用原生 API 恢复。全套 91 项测试通过。
+
 ### Linux 后台运行
 
 先停止前台桥接，再安装生成的**用户服务**：
@@ -120,13 +124,66 @@ journalctl --user -u codex-wechat-harness -n 30 --no-pager
 | `help` / `帮助` | 查看说明 |
 | 普通文字、图片或语音 | 继续当前会话；首次按项目最近更新选择可输入会话 |
 | `会话列表` | 显示最近的会话与序号 |
-| `切换 2` | 切到最近一次成功发送列表中的第 2 个会话 |
+| `切换 2` | 按指令收到时已发送的列表切到第 2 个会话；列表 10 分钟有效，新增会话后需刷新 |
 | `切换 完整名称` | 切到唯一同名会话；重名请用序号 |
 | `当前会话` | 查看当前项目和会话 |
-| `新建任务 名称` | 新建并选中会话，不自动开始执行 |
+| `新建会话 名称` | 新建并选中会话，不自动开始执行 |
 | `CABC123 答案` | 回答对应编号的问题；选项也可用序号 |
 
 图片附带文字按用户内容处理，不触发会话管理命令。切换不取消原任务，也不会根据聊天间隔自动新建会话。支持普通微信 DM；不作为群聊机器人使用。
+
+会话中的 `commentary` 进展消息也会回传，最终结果仍按执行轮次去重。原生 `item/commandExecution/requestApproval` 会显示命令、目录、原因及授权编号；只支持服务端提供的“允许本次”“拒绝本次”或“拒绝并停止本轮”，不提供会话范围或永久授权。回复卡片的序号或完整选项文字后，以原生 `decision` 交回当前执行并等待确认回执。命令无法完整展示时，手机端只提供拒绝选项，需到 Codex 桌面核对。控制连接恢复后，同一审批回调恢复原编号，不重复创建授权问题。
+
+### 多主机接入
+
+在私有 `.local/config.json` 中保留原本机配置，再添加 `hosts`：
+
+```json
+{
+  "local_host_id": "ubuntu",
+  "local_host_name": "Ubuntu",
+  "hosts": [{
+    "id": "mac-mini",
+    "name": "Mac mini",
+    "aliases": ["leomac-mini"],
+    "codex_socket": "/home/ubuntu/leo-project/codex-wechat/.local/hosts/mac-mini/control.sock",
+    "project_cwd": "/Users/leo/leo-project",
+    "ssh_target": "leo@100.117.21.117",
+    "ssh_identity": "/home/ubuntu/.ssh/id_ed25519",
+    "remote_image_dir": "/Users/leo/.codex/wechat-images"
+  }]
+}
+```
+
+这是需要合入原配置的字段，不是完整配置文件。`codex_socket` 是 SSH 在 Ubuntu 上转发出的 Unix socket；远端 App Server 保持运行。SSH 主机密钥必须事先核验，隧道使用 `StrictHostKeyChecking=yes`。部署示例见 `deploy/codex-wechat-mac-mini-tunnel.service`，更换路径和地址后安装启用。
+
+微信发送 `主机列表`、`当前主机`、`切换 macmini`、`切换 macbook`、`切换 windows`、`切换 ubuntu`。也兼容无空格的写法和 `切换主机 名称`。主机别名忽略大小写、空格、横线和下划线；`切换 2` 仍切换当前主机的会话。注册的主机名称优先于同名会话。切换主机要求目标 Codex 控制连接在线，失败保留原主机。
+
+Windows 和 MacBook 同样作为 `hosts` 条目接入。MacBook 的 SSH Unix socket 隧道示例见 `deploy/codex-wechat-macbook-tunnel.service`；实际 SSH 登录名和用户目录可能不同，请分别确认。当前 Windows 主机的 SSH 默认 shell 为 Git Bash，使用现有 Codex 的 `app-server proxy --sock` 透传原始 WebSocket 数据，Ubuntu 上由 `python -m harness.ssh_proxy --host windows` 提供私有 Unix socket，不新建或重启远端 App Server。服务示例见 `deploy/codex-wechat-windows-proxy.service`。
+
+Windows 主机条目增加 `remote_platform: "windows"`、`codex_proxy_socket: "C:/Users/用户名/.codex/app-server-control/app-server-control.sock"`、`project_cwd: "E:/leo-project"`、`remote_python: "D:/anaconda/python.exe"` 和 `remote_image_dir: "C:/Users/用户名/.codex/wechat-images"`，并保留 Ubuntu 侧的 `codex_socket`、`ssh_target` 和 `ssh_identity`。按实际安装路径修改；`remote_python` 必须指向可用 Python，不能使用未安装解释器的 WindowsApps 占位程序。Windows 项目与结果图片支持盘符路径，项目匹配忽略大小写和斜杠差异。其他 Windows SSH shell 需要适配命令转义后才能使用。四台主机分别保存自己的会话、问题和消息队列，只有当前选中主机可以推送消息。
+
+每台主机使用独立数据库保存会话选择、编号列表、问题、输入队列和发送状态；重启保留主机选择。消息在接收时固定目标主机，断线消息恢复后仍交给原主机，不转交当前主机。切换不会中断原任务；只接收当前选中主机的结果、图片、确认问题和状态回复，其他主机的消息留在各自队列，切回后恢复发送，过期或失效问题不再发送。所有文字回复标明主机；回复其他主机的问题编号需要先切回原主机，编号碰撞拒绝递交。已经提交给微信的消息可能在切换后才到达。
+
+切换主机、切换会话和新建会话时，先通过 `thread/unsubscribe` 释放旧会话，再连接目标会话。释放状态持久保存在 `chat_released`，后台轮询和断线重连不会重新占用已释放的会话；旧任务结果通过 `thread/turns/list` 查询，不需要重新连接。发送「断开会话」可释放当前会话，让桌面点击「重试」接续；再次明确发消息或切换回该会话会重新连接。切换失败不提交目标输入；取消订阅与中断任务分别使用不同的原生 API，桥接切换不发送 `turn/interrupt`。未选中的主机不自动订阅会话，两个通道各自保存连接状态。
+
+注意：这里释放的是桥接订阅，不能据此认定跨进程写入锁已立即释放。原生服务在最后一个订阅者离开后仍有闲置保留期；独立终端或另一个 App Server 也可能持有 `thread-writer-locks`。桌面仍提示“已在另一个应用中打开”时，应先核对线程编号和实际持锁进程；只有确认任务已完成、相关后台全部空闲且无待提交输入后，才关闭相应客户端或通过原生 daemon 管理命令释放后台锁。不要删除锁文件、归档历史或对正在执行的任务直接重启后台。
+
+配置 SSH 图片传输后，入站图片先通过 SSH 保存到远端私有目录，再传入远端 `localImage`；结果图片通过 SSH 下载、验证格式和大小后由 Ubuntu 微信通道发送。只支持已有图片类型与 20 MiB 上限。
+
+远端桥接只订阅选中的和微信管理的会话，不自动订阅全部已加载任务。共享 App Server 能恢复的历史会话与桌面独立 App Server 中正在执行的任务有区别；接入共享接口不代表接管桌面正在运行的任务。远端原生 `requestUserInput` 可回到微信；桌面专用 `request_user_input_async` 的 rollout 监听当前仅支持本机。
+
+`health` 返回每台主机的控制连接状态、当前项目和会话；“Codex 已连接”表示控制接口可用，不能作为独立桌面任务可接管的证明。未配置 `hosts` 时保留原单主机行为。Hermes 继续只在 Ubuntu 上登录和收发微信。
+
+## QQ 入口
+
+Hermes 已启用 QQ 后，同一个 `codex-wechat-harness` 插件也能把 QQ 私聊交给这套桥接。QQ 使用私有 `.local/channels/qqbot/config.json`，以微信配置为基础保留四台主机的连接字段，再设 `platform: "qqbot"`、`chat_id` 和 `allowed_users` 为已绑定 QQ 私聊的 OpenID（不是数字 QQ 号）。设 `gateway_send_socket` 为该目录下 `outbound.sock`，并设 `managed_threads_only: true`，只监听此入口选择或管理的会话。QQ 不另存机器人密钥，也不创建第二个 QQ 登录连接。
+
+运行 `deploy/codex-qq-harness.service` 中的独立桥接服务。插件需通过 Hermes 已有控制接口热加载。QQ 首条授权私聊会建立私有发送 socket，复用 Hermes 正在运行的 QQ adapter 和最新消息回复上下文；QQ 主动消息或回复上下文受限时，以实际发送回执为准。尚无发送上下文的通知留在队列，收到授权新消息后恢复；回执不明的消息不自动重发。
+
+QQ 和微信均支持 `help`、`帮助`、`主机列表`、`当前主机`、`切换 macmini`、`切换 macbook`、`切换 windows`、`切换 ubuntu`、`会话列表`、`当前会话`、`新建会话 名称`、会话切换及编号回答。支持文字和图片；QQ 已转写语音去掉 adapter 的 `[Voice]` 标记后走同样的命令路由，识别失败不执行命令。结果、图片和确认问题回传到对应通道，两个入口分别保存主机选择、会话选择、编号列表、问题、输入去重和发送队列，均只推送本入口当前选中主机的消息。未绑定的 QQ 用户保留 Hermes 原有路由；已绑定入口故障时不会自动转给 Hermes 模型执行。
+
+使用 CLI 检查 QQ 状态时，设置 `CODEX_WECHAT_HOME=/绝对路径/codex-wechat/.local/channels/qqbot` 后运行 `python -m harness.cli health`。`health` 返回 `platform` 和通用 `channel_needs_message`；旧 `wechat_needs_message` 字段作为兼容别名保留。
 
 ## 语音输入
 
@@ -178,6 +235,8 @@ python -m harness.cli ask --key question-001 \
 | `stale` / `needs_review` | 原轮次变化或请求失效，需核对原任务 |
 
 单个会话订阅报错不会断开整条共享连接。断线期间尚未递交的输入等待恢复，并继续接收时选中的会话。已递交但回执不明的输入不会重放。微信上传接口偶尔可能返回 500；仅生成图片不代表微信端已收到。
+
+微信通知在后台独立发送：完成结果先持久化，输入处理、完成事件和会话轮询不等待微信回执。发送默认最多等待 20 秒，可用 `notification_timeout` 配置（最多 60 秒）；超时进入 `uncertain`，不自动重发。重复唤醒发送队列会合并为同一个后台任务。图片与提问接口返回排队状态，实际结果以状态记录为准。微信会话失效不代表 Codex 在等待业务决策，应继续所有不依赖用户答案的工作；收到新的授权微信消息后只补发尚未发送的通知。
 
 ## 开发验证
 

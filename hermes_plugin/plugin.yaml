@@ -1,4 +1,4 @@
 name: codex-wechat-harness
 kind: standalone
 version: 0.2.1
-description: Bridge WeChat text, images, transcribed voice, conversations and numbered replies to an existing Codex App Server.
+description: Bridge WeChat and QQ text, images, transcribed voice, conversations and numbered replies to existing Codex App Servers.

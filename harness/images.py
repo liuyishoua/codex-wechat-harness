@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from pathlib import PureWindowsPath
 from urllib.parse import unquote
 
 from PIL import Image
@@ -57,6 +58,9 @@ def local_result_images(text):
             if path.startswith('//'):
                 path = path[2:]
         path = unquote(path)
-        if path.startswith('/') and path not in paths:
+        # file:///C:/... has a URI slash before the Windows drive.
+        if re.match(r'^/[a-zA-Z]:[/\\]', path):
+            path = path[1:]
+        if (path.startswith('/') or PureWindowsPath(path).is_absolute()) and path not in paths:
             paths.append(path)
     return paths[:MAX_IMAGES]
