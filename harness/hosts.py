@@ -85,6 +85,10 @@ class Hosts:
                     fingerprint = hashlib.sha256(json.dumps([row['content'], paths], ensure_ascii=False).encode()).hexdigest()
                     db.execute('INSERT OR IGNORE INTO host_inbound VALUES(?,?,?,?)',
                                (row['message_id'], fingerprint, self.local_id, 'done'))
+        stores = [bridge.store for bridge in self.bridges.values()]
+        for host_store in stores:
+            host_store.outbound_stores = stores
+        self.store.prune_outbound()
         self.chat = HostChat(self) if config.get('chat_enabled') else None
         for ident, bridge in self.bridges.items():
             bridge.is_selected = lambda host=ident: not self.chat or self.chat.selected() == host

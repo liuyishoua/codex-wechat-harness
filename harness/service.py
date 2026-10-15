@@ -24,6 +24,8 @@ log = logging.getLogger('codex-wechat')
 class Bridge:
     def __init__(self, config, store, sender=None, codex=None):
         self.config, self.store = config, store
+        if config.get('outbound_queue_limit') is not None:
+            store.outbound_limit = max(0, int(config['outbound_queue_limit']))
         self.sender = sender or channel_sender(config)
         self.codex = codex or Codex(config['codex_socket'], self.event)
         self.native, self.resolved, self.joined = {}, {}, set()
@@ -63,7 +65,8 @@ class Bridge:
         return self.store.get(row['id'])
 
     async def send(self, row):
-        if row['state']!='pending': return
+        row = self.store.get(row['id'])
+        if not row or row['state']!='pending' or row['outbound'] not in ('queued','blocked_session'): return
         if row['expires']<time.time():
             self.store.update(row['id'],state='expired')
             return
@@ -71,8 +74,10 @@ class Bridge:
         if latest['id']!=row['turn_id']:
             self.store.update(row['id'],state='stale',delivery_error='原问题所在轮次已经结束')
             return
+        if self.store.get(row['id'])['outbound'] == 'discarded': return
         if self.channel_blocked:
             self.store.update(row['id'],outbound='blocked_session')
+            self.store.prune_outbound()
             return
         if not self.store.claim_send(row['id']): return
         try:
@@ -85,6 +90,7 @@ class Bridge:
             log.warning('question=%s notification=blocked_session',row['id'])
         except NotificationDeferred:
             self.store.update(row['id'], outbound='queued')
+            self.store.prune_outbound()
         except Exception as exc:
             self.store.update(row['id'], outbound='uncertain', delivery_error=channel_name(self.config)+'通知未确认：'+type(exc).__name__)
             log.warning('question=%s notification=uncertain error=%s', row['id'], type(exc).__name__)

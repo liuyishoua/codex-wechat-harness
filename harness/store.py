@@ -5,7 +5,11 @@ import re
 import secrets
 import sqlite3
 import time
+import threading
 from contextlib import contextmanager
+
+
+_OUTBOUND_LOCK = threading.RLock()
 
 
 class Conflict(ValueError):
@@ -15,6 +19,8 @@ class Conflict(ValueError):
 class Store:
     def __init__(self, path):
         self.path = path
+        self.outbound_limit = None
+        self.outbound_stores = [self]
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.db() as db:
             db.executescript('''
@@ -68,7 +74,31 @@ class Store:
                 (ident, key, thread_id, turn_id, json.dumps(questions, ensure_ascii=False), kind,
                  json.dumps(runtime_id) if runtime_id is not None else None, time.time(), time.time()+86400))
             db.execute('INSERT INTO events(question_id,kind,created) VALUES(?,?,?)', (ident, 'created', time.time()))
-            return dict(db.execute('SELECT * FROM questions WHERE id=?', (ident,)).fetchone()), True
+        self.prune_outbound()
+        return self.get(ident), True
+
+    def prune_outbound(self):
+        """Bound unsent notifications across the channel's host stores."""
+        if self.outbound_limit is None:
+            return
+        with _OUTBOUND_LOCK:
+            pending = []
+            for index, store in enumerate(self.outbound_stores):
+                with store.db() as db:
+                    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if 'chat_outbox' in tables:
+                        pending.extend((r['created'], index, r['rowid'], 'chat', r['key']) for r in
+                            db.execute("SELECT rowid,key,created FROM chat_outbox WHERE state='queued'"))
+                    pending.extend((r['created'], index, r['rowid'], 'question', r['id']) for r in
+                        db.execute("SELECT rowid,id,created FROM questions WHERE state='pending' AND outbound IN ('queued','blocked_session')"))
+            pending.sort(reverse=True)
+            for _, index, _, kind, key in pending[max(0, self.outbound_limit):]:
+                with self.outbound_stores[index].db() as db:
+                    if kind == 'chat':
+                        db.execute("UPDATE chat_outbox SET state='discarded' WHERE key=? AND state='queued'", (key,))
+                    else:
+                        # Dropping a notification never answers/cancels approval.
+                        db.execute("UPDATE questions SET outbound='discarded' WHERE id=? AND outbound IN ('queued','blocked_session')", (key,))
 
     def get(self, ident):
         with self.db() as db:
@@ -87,6 +117,7 @@ class Store:
                        (ident, 'state:'+fields.get('state', fields.get('outbound','update')), time.time()))
 
     def claim_send(self, ident):
+        self.prune_outbound()
         with self.db() as db:
             return db.execute("UPDATE questions SET outbound='sending' WHERE id=? AND outbound='queued' AND state='pending'", (ident,)).rowcount == 1
 

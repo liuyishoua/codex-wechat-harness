@@ -424,6 +424,7 @@ class Chat:
             text = text[:3400] + '\n\n内容较长，完整结果请到 Codex 桌面查看。'
         with self.store.db() as db:
             db.execute('INSERT OR IGNORE INTO chat_outbox(key,content,created) VALUES(?,?,?)', (key, text, time.time()))
+        self.store.prune_outbound()
 
     async def queue_image(self, key, path):
         if getattr(self.bridge, 'image_transport', None):
@@ -435,9 +436,11 @@ class Chat:
                 raise Conflict('同一发送编号对应不同图片')
             db.execute('INSERT OR IGNORE INTO chat_outbox_images VALUES(?,?)', (key, saved))
             db.execute('INSERT OR IGNORE INTO chat_outbox(key,content,created) VALUES(?,?,?)', (key, '', time.time()))
+        self.store.prune_outbound()
         return key
 
     async def flush(self):
+        self.store.prune_outbound()
         async with self.send_lock:
             if self.bridge.channel_blocked:
                 return
@@ -459,6 +462,7 @@ class Chat:
                 except NotificationDeferred:
                     with self.store.db() as db:
                         db.execute("UPDATE chat_outbox SET state='queued' WHERE key=?", (row['key'],))
+                    self.store.prune_outbound()
                     return
                 except Exception:
                     state = 'uncertain'
@@ -468,6 +472,7 @@ class Chat:
                         snapshot = db.execute('SELECT chat_id FROM chat_lists WHERE key=?', (row['key'],)).fetchone()
                         if snapshot:
                             db.execute('INSERT OR REPLACE INTO chat_list_active VALUES(?,?)', (snapshot['chat_id'], row['key']))
+                self.store.prune_outbound()
                 if self.bridge.channel_blocked:
                     return
 
