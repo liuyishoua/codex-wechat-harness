@@ -24,8 +24,13 @@ class Codex:
         self.calls.append((method, params))
         thread_id = params.get('threadId')
         if method == 'thread/list':
-            threads = [t for t in self.threads.values() if t.get('cwd') == params['cwd']]
+            threads = [t for t in self.threads.values() if not params.get('cwd') or t.get('cwd') == params['cwd']]
             return {'data': sorted(threads, key=lambda t: t.get('updatedAt', 0), reverse=True)}
+        if method == 'thread/read':
+            from harness.codex import RpcError
+            if thread_id not in self.threads:
+                raise RpcError({'code': -32600})
+            return {'thread': self.threads[thread_id]}
         if method == 'thread/start':
             thread_id = 'thread-' + str(len(self.threads) + 1)
             self.threads[thread_id] = {'id': thread_id, 'cwd': params['cwd']}
@@ -78,7 +83,7 @@ def test_help_without_starting_task(tmp_path):
     asyncio.run(check())
 
 
-def test_plain_chat_uses_latest_project_session_and_preserves_selection(tmp_path):
+def test_plain_chat_uses_latest_host_session_and_preserves_selection(tmp_path):
     async def check():
         b, c, sent = setup(tmp_path)
         c.threads = {
@@ -88,8 +93,9 @@ def test_plain_chat_uses_latest_project_session_and_preserves_selection(tmp_path
             'other': {'id': 'other', 'name': '其他项目', 'cwd': '/tmp/other', 'updatedAt': 4},
         }
         assert (await message(b, '继续聊', 'ordinary'))['handled']
-        assert b.chat.current()['thread_id'] == 'recent'
-        assert [p for m, p in c.calls if m == 'turn/start'][-1]['threadId'] == 'recent'
+        assert b.chat.current()['thread_id'] == 'other'
+        assert b.chat.current()['cwd'] == '/tmp/other'
+        assert [p for m, p in c.calls if m == 'turn/start'][-1]['threadId'] == 'other'
         assert not any(m == 'thread/start' for m, p in c.calls)
         await message(b, '切换 旧任务', 'switch')
         c.threads['recent']['updatedAt'] = 99
@@ -266,7 +272,7 @@ def test_number_switch_uses_delivered_list_despite_new_order_and_restart(tmp_pat
             'second': {'id': 'second', 'name': '同名任务', 'cwd': b.chat.cwd, 'updatedAt': 1},
         }
         await message(b, '会话列表', 'list')
-        assert '1. 同名任务\n\n2. 同名任务' in sent[-1]
+        assert sent[-1].index('1. 同名任务') < sent[-1].index('2. 同名任务')
         c.threads['second']['updatedAt'] = 99
         restored = Bridge(CONFIG, b.store, b.sender, c)
         restored.connected = True

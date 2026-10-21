@@ -276,8 +276,10 @@ class HostChat:
                             if row['state'] == 'pending' and row['outbound'] == 'queued':
                                 b.spawn(b.send(row))
                         current = b.chat.current()
-                        response = '已切换到 ' + self.hub.names[target] + '\n项目：' + b.chat.cwd
+                        response = '已切换到 ' + self.hub.names[target] + '\n新建会话默认目录：' + b.chat.cwd
                         response += '\n当前会话：' + (current['name'] if current else '尚未选择；发送「会话列表」或「新建会话 名称」。')
+                        if current:
+                            response += '\n会话目录：' + current['cwd']
                         response += '\n只接收此主机的会话消息；原主机任务继续运行，消息切回后发送。'
                 elif action == '主机列表':
                     response = '\n'.join(s['name'] + ' · ' + ('Codex 已连接' if s['connected'] else 'Codex 未连接') +
@@ -285,9 +287,11 @@ class HostChat:
                                          for s in self.hub.host_status())
                     response += '\n\n发送对应的切换命令即可。'
                 elif action == '当前主机':
-                    response = '当前主机：' + self.hub.names[host] + '\n项目：' + b.chat.cwd
+                    response = '当前主机：' + self.hub.names[host] + '\n新建会话默认目录：' + b.chat.cwd
                     current = b.chat.current()
                     response += '\n当前会话：' + (current['name'] if current else '尚未选择')
+                    if current:
+                        response += '\n会话目录：' + current['cwd']
                 else:
                     examples = '\n'.join('切换 ' + host_key(name) for name in self.hub.names.values())
                     response = b.chat.help() + '\n\n🖥 主机管理\n主机列表\n当前主机\n' + examples + '\n切换主机 名称\n会话列表和新建会话作用于当前主机。'

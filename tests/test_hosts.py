@@ -130,6 +130,41 @@ def test_burst_switch_pins_following_input_and_offline_queue(tmp_path):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize('offline', [True, False])
+def test_switch_away_from_disconnected_host_with_stale_subscription(tmp_path, offline):
+    from aiohttp import ClientConnectionResetError
+
+    async def check():
+        hub, clients, sent = setup(tmp_path)
+        await message(hub, '切换 Mac mini', 'select-mac')
+        await message(hub, '新建会话 原任务', 'mac-session')
+        mac = hub.bridges['mac-mini']
+        thread = mac.chat.current()['thread_id']
+        assert thread in mac.joined
+        mac.connected = not offline
+
+        async def disconnected(method, params):
+            clients['mac-mini'].calls.append((method, params))
+            raise ClientConnectionResetError('connection closed')
+
+        clients['mac-mini'].rpc = disconnected
+        before = len(clients['mac-mini'].calls)
+        await message(hub, '切换 ubuntu', 'escape-offline-host')
+        assert hub.chat.selected() == 'ubuntu'
+        assert mac.chat.released(thread)
+        assert thread not in mac.joined
+        assert mac.chat.current()['thread_id'] == thread
+        assert len(clients['mac-mini'].calls) == before + (0 if offline else 1)
+        assert await mac.chat.join(thread, automatic=True) is False
+        assert '已切换到 Ubuntu' in sent[-1]
+        await message(hub, '本地继续', 'local-after-switch')
+        assert clients['ubuntu'].calls[-1][0] == 'turn/start'
+        assert clients['ubuntu'].calls[-1][1]['input'][0]['text'] == '本地继续'
+        assert not any(m == 'turn/interrupt' for c in clients.values() for m, p in c.calls)
+
+    asyncio.run(check())
+
+
 def test_slow_image_copy_keeps_receipt_host_before_later_switch(tmp_path, monkeypatch):
     import threading
     from PIL import Image

@@ -3,27 +3,31 @@ import asyncio
 import json
 import ntpath
 import time
+import uuid
 from pathlib import Path
+
+import aiohttp
 
 from .config import ROOT, channel_name, message_prefix
 from .images import snapshot, local_result_images, MAX_IMAGES
 from .codex import RpcError
 from .store import Conflict
 from .transport import ChannelNeedsMessage, NotificationDeferred
-from .remote import windows, same_cwd
+from .remote import windows, absolute
 from .projects import project_id, attach as attach_project
 
 HELP = '''🤖 Codex 微信助手
-项目：{project}
+新建会话默认项目：{project}
 
 💬 直接聊天
 文字、图片和语音会接着当前会话处理。
 首次聊天自动接上最近的会话。
 
 📋 会话管理
-会话列表 → 查看带序号的会话
+会话列表 → 查看当前主机全部项目的最近会话
 切换 2 → 切到列表中的第 2 个会话
 切换 名称 → 按完整名称切换
+切换 会话ID → 按完整 UUID 切换
 当前会话 → 查看正在聊的任务
 新建会话 名称 → 开启新的会话
 断开会话 → 断开当前桥接连接
@@ -123,9 +127,17 @@ class Chat:
             row = db.execute('SELECT * FROM chat_sessions WHERE thread_id=?', (thread_id,)).fetchone()
             return dict(row) if row else None
 
-    def remember(self, thread_id, name):
+    def remember(self, thread_id, name, cwd=None):
         with self.store.db() as db:
-            db.execute('INSERT OR REPLACE INTO chat_sessions VALUES(?,?,?)', (thread_id, name, self.cwd))
+            db.execute('INSERT OR REPLACE INTO chat_sessions VALUES(?,?,?)', (thread_id, name, cwd or self.cwd))
+
+    def location(self, session):
+        cwd = session.get('cwd') or self.cwd
+        name = ntpath.basename(ntpath.normpath(cwd)) if windows(self.bridge.config) else Path(cwd).name
+        return '项目：' + display_name(name or cwd) + '\n目录：' + cwd
+
+    def remember_thread(self, thread):
+        self.remember(thread['id'], thread.get('name') or thread.get('preview') or thread['id'], thread.get('cwd'))
 
     def select(self, thread_id):
         with self.store.db() as db:
@@ -175,7 +187,7 @@ class Chat:
             raise ConnectionError('Codex 未连接')
         cursor = None
         while True:
-            params = {'cwd': self.cwd, 'limit': 100, 'sortKey': 'updated_at', 'sortDirection': 'desc',
+            params = {'limit': 100, 'sortKey': 'updated_at', 'sortDirection': 'desc',
                       'sourceKinds': ['cli', 'vscode', 'appServer'], 'useStateDbOnly': True}
             if cursor:
                 params['cursor'] = cursor
@@ -183,9 +195,7 @@ class Chat:
             for thread in result.get('data') or []:
                 if thread.get('canAcceptDirectInput') is False:
                     continue
-                if thread.get('cwd') and not same_cwd(thread['cwd'], self.cwd, self.bridge.config):
-                    continue
-                self.remember(thread['id'], thread.get('name') or thread.get('preview') or thread['id'])
+                self.remember_thread(thread)
                 self.select(thread['id'])
                 return self.current()
             cursor = result.get('nextCursor')
@@ -202,17 +212,15 @@ class Chat:
         cursor = None
         available = []
         while True:
-            params = {'cwd': self.cwd, 'limit': 100, 'sortKey': 'updated_at',
+            params = {'limit': 100, 'sortKey': 'updated_at', 'sortDirection': 'desc',
                       'sourceKinds': ['cli', 'vscode', 'appServer'], 'useStateDbOnly': True}
             if cursor:
                 params['cursor'] = cursor
             result = await self.bridge.codex.rpc('thread/list', params)
             for thread in result.get('data') or []:
-                if thread.get('cwd') and not same_cwd(thread['cwd'], self.cwd, self.bridge.config):
-                    continue
                 if thread.get('canAcceptDirectInput') is False:
                     continue
-                self.remember(thread['id'], thread.get('name') or thread.get('preview') or thread['id'])
+                self.remember_thread(thread)
                 if thread['id'] not in available:
                     available.append(thread['id'])
             cursor = result.get('nextCursor')
@@ -240,7 +248,13 @@ class Chat:
         with self.store.db() as db:
             db.execute('INSERT OR IGNORE INTO chat_released VALUES(?)', (thread_id,))
         if thread_id in self.bridge.joined:
-            await self.bridge.codex.rpc('thread/unsubscribe', {'threadId': thread_id})
+            if self.bridge.connected:
+                try:
+                    await self.bridge.codex.rpc('thread/unsubscribe', {'threadId': thread_id})
+                except (ConnectionError, OSError, TimeoutError, aiohttp.ClientError):
+                    # A lost source connection must not trap host selection.
+                    # The durable release marker also prevents reattachment.
+                    pass
             self.bridge.joined.discard(thread_id)
 
     async def release_all(self):
@@ -283,34 +297,57 @@ class Chat:
             return
         if action == '当前会话':
             current = await self.default_session()
-            self.enqueue(key, '💬 当前会话\n\n「' + display_name(current['name']) + '」\n项目：{project}\n\n直接发消息，继续这个任务。'.replace('{project}', self.project_name))
+            self.enqueue(key, '💬 当前会话\n\n「' + display_name(current['name']) + '」\n' + self.location(current) + '\nID：' + current['thread_id'] + '\n\n直接发消息，继续这个任务。')
             return
         if not self.bridge.connected:
             raise ConnectionError('Codex 未连接')
         if action in ('new', 'switch') and (not argument or len(argument) > 120 or '\n' in argument):
             self.enqueue(key, '💡 请这样发送\n\n新建会话 微信接入\n切换 2\n切换 微信接入\n\n发送「会话列表」查看序号。名称最多 120 字。')
             return
+        if action == 'switch':
+            try:
+                ident = str(uuid.UUID(argument))
+            except ValueError:
+                ident = None
+            if ident:
+                try:
+                    result = await self.bridge.codex.rpc('thread/read', {'threadId': ident})
+                except RpcError:
+                    self.enqueue(key, '此主机无法读取该会话，未切换。请核对完整会话 ID、会话状态及所选主机。')
+                    return
+                thread = result.get('thread') or {}
+                if (thread.get('id') != ident or thread.get('canAcceptDirectInput') is False
+                        or thread.get('ephemeral') or thread.get('archived')
+                        or not absolute(thread.get('cwd'), self.bridge.config)):
+                    self.enqueue(key, '该会话不支持直接继续或缺少工作目录，未切换。')
+                    return
+                self.remember_thread(thread)
+                await self.join(ident)
+                self.select(ident)
+                selected = self.session(ident)
+                self.enqueue(key, '✅ 已切到「' + display_name(selected['name']) + '」会话\n\n' + self.location(selected) + '\nID：' + ident + '\n之后的消息接着这里聊。')
+                return
         if action in ('new', 'switch', '会话列表'):
             available = await self.refresh()
             with self.store.db() as db:
-                known = {r['thread_id']: dict(r) for r in db.execute('SELECT * FROM chat_sessions WHERE cwd=?', (self.cwd,))}
+                known = {r['thread_id']: dict(r) for r in db.execute('SELECT * FROM chat_sessions')}
                 sessions = [known[ident] for ident in available]
             matches = [s for s in sessions if s['name'] == argument]
             if action == '会话列表':
                 current = self.current()
-                shown = sessions[:50]
+                shown = sessions[:10]
                 lines = [str(n) + '. ' + display_name(s['name']) +
                          ('  ← 当前' if current and s['thread_id'] == current['thread_id'] else '')
                          for n, s in enumerate(shown, 1)]
                 with self.store.db() as db:
                     db.execute('INSERT OR REPLACE INTO chat_lists VALUES(?,?,?)',
                                (key, self.bridge.config['chat_id'], json.dumps([s['thread_id'] for s in shown])))
-                text = '📋 会话列表 · {project}\n\n' + '\n\n'.join(lines) if lines else '📋 会话列表 · {project}\n\n暂无会话。\n发送「新建会话 名称」即可开始。'
-                if len(sessions) > 50:
-                    text += '\n\n已显示最近 50 个会话。'
+                text = '📋 当前主机会话列表 · 全部项目\n\n' + '\n\n'.join(lines) if lines else '📋 当前主机会话列表 · 全部项目\n\n暂无会话。\n发送「新建会话 名称」即可开始。'
+                if len(sessions) > 10:
+                    text += '\n\n已显示最近 10 个会话。'
                 if lines:
-                    text += '\n\n发送「切换 2」切换会话。\n序号对应这份列表，10分钟内有效；新增会话后请刷新列表。\n也支持完整名称。'
-                self.enqueue(key, text.replace("{project}", self.project_name))
+                    text += '\n\n发送「切换 2」切换会话。\n序号对应这份列表，10分钟内有效；新增会话后请刷新列表。\n也支持完整名称或完整会话 ID。'
+                self.enqueue(key, text)
                 return
             if action == 'new':
                 if matches:
@@ -336,7 +373,7 @@ class Chat:
                     self.enqueue(key, '💡 请先发送「会话列表」\n\n收到列表后，再发送「切换 2」。')
                     return
                 ids = json.loads(snapshot['thread_ids'])
-                if job['created'] - snapshot['created'] > 600 or set(available[:50]) - set(ids):
+                if job['created'] - snapshot['created'] > 600 or set(available[:10]) - set(ids):
                     self.enqueue(key, '💡 旧列表已失效，这次没有切换\n\n发送「会话列表」获取新序号，或直接发送「切换 完整会话名称」。')
                     return
                 index = number - 1
@@ -353,7 +390,7 @@ class Chat:
                 return
             await self.join(matches[0]['thread_id'])
             self.select(matches[0]['thread_id'])
-            self.enqueue(key, '✅ 已切到「' + display_name(matches[0]['name']) + '」会话\n\n项目：{project}\n之后的消息接着这里聊。'.replace('{project}', self.project_name))
+            self.enqueue(key, '✅ 已切到「' + display_name(matches[0]['name']) + '」会话\n\n' + self.location(matches[0]) + '\n之后的消息接着这里聊。')
             return
         current = self.session(job['thread_id']) if job.get('thread_id') else await self.default_session()
         thread_id = current['thread_id']
