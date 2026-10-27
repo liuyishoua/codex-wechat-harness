@@ -48,7 +48,7 @@ def test_uuid_switch_reads_target_without_listing_or_starting_a_turn(tmp_path):
         assert b.chat.current()['thread_id']==TARGET
         assert b.joined=={TARGET} and b.chat.released(old)
         methods=[m for m,p in c.calls]
-        assert methods.index('thread/read')<methods.index('thread/unsubscribe')<methods.index('thread/resume')
+        assert methods.index('thread/read')<methods.index('thread/resume')<methods.index('thread/unsubscribe')
         assert not any(m in ('thread/list','turn/start','turn/interrupt','thread/metadata/update') for m in methods)
         assert OTHER_CWD in sent[-1] and TARGET in sent[-1]
     asyncio.run(check())

@@ -68,6 +68,10 @@ def command(text):
     return 'message', text, explicit
 
 
+class SessionLookupError(RuntimeError):
+    """A session lookup failed before any switch or creation was attempted."""
+
+
 class Chat:
     def __init__(self, bridge):
         self.bridge = bridge
@@ -85,6 +89,10 @@ class Chat:
             db.executescript('''
               CREATE TABLE IF NOT EXISTS chat_job_images(message_id TEXT PRIMARY KEY, paths TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS chat_job_lists(message_id TEXT PRIMARY KEY, list_key TEXT);
+              CREATE TABLE IF NOT EXISTS chat_job_dependencies(
+                message_id TEXT PRIMARY KEY, selection_job_id TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS chat_selection_results(
+                message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS chat_outbox_images(key TEXT PRIMARY KEY, path TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS chat_sessions(
                 thread_id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL);
@@ -139,11 +147,14 @@ class Chat:
     def remember_thread(self, thread):
         self.remember(thread['id'], thread.get('name') or thread.get('preview') or thread['id'], thread.get('cwd'))
 
-    def select(self, thread_id):
+    def select(self, thread_id, message_id=None):
         with self.store.db() as db:
             db.execute('INSERT OR REPLACE INTO chat_selection VALUES(?,?)',
                        (self.bridge.config['chat_id'], thread_id))
             db.execute('INSERT OR IGNORE INTO chat_managed VALUES(?)', (thread_id,))
+            if message_id:
+                db.execute('INSERT OR REPLACE INTO chat_selection_results VALUES(?,?)',
+                           (message_id, thread_id))
 
     async def accept(self, data):
         if not self.bridge.authorized(data):
@@ -165,9 +176,24 @@ class Chat:
         with self.store.db() as db:
             selected = self.current()
             target = selected['thread_id'] if selected and (images or command(text)[0] == 'message') else None
+            dependency = None
+            if images or command(text)[0] == 'message':
+                # A message received behind a queued switch belongs to its result,
+                # not to the selection that happened to exist at receipt time.
+                pending = db.execute("SELECT j.message_id,j.content,i.paths FROM chat_jobs j "
+                                     "LEFT JOIN chat_job_images i ON i.message_id=j.message_id "
+                                     "WHERE j.state IN ('queued','processing') ORDER BY j.created DESC,j.rowid DESC")
+                for prior in pending:
+                    if (not json.loads(prior['paths'] or '[]')
+                            and command(prior['content'])[0] in ('new', 'switch')):
+                        dependency = prior['message_id']
+                        target = None
+                        break
             db.execute('INSERT INTO chat_jobs(message_id,content,thread_id,created) VALUES(?,?,?,?)',
                        (message_id, text, target, time.time()))
             db.execute('INSERT INTO chat_job_images VALUES(?,?)', (message_id, json.dumps(paths)))
+            if dependency:
+                db.execute('INSERT INTO chat_job_dependencies VALUES(?,?)', (message_id, dependency))
             action, argument, _ = command(text)
             if not images and action == 'switch' and list_number(argument) is not None:
                 active = db.execute('SELECT list_key FROM chat_list_active WHERE chat_id=?',
@@ -187,11 +213,12 @@ class Chat:
             raise ConnectionError('Codex 未连接')
         cursor = None
         while True:
-            params = {'limit': 100, 'sortKey': 'updated_at', 'sortDirection': 'desc',
+            params = {'limit': 10, 'sortKey': 'updated_at', 'sortDirection': 'desc',
                       'sourceKinds': ['cli', 'vscode', 'appServer'], 'useStateDbOnly': True}
             if cursor:
                 params['cursor'] = cursor
-            result = await self.bridge.codex.rpc('thread/list', params)
+            query = getattr(self.bridge.codex, 'read_only_rpc', self.bridge.codex.rpc)
+            result = await query('thread/list', params)
             for thread in result.get('data') or []:
                 if thread.get('canAcceptDirectInput') is False:
                     continue
@@ -208,21 +235,27 @@ class Chat:
         self.select(thread_id)
         return self.current()
 
-    async def refresh(self):
+    async def refresh(self, limit=None, search_term=None):
         cursor = None
         available = []
         while True:
-            params = {'limit': 100, 'sortKey': 'updated_at', 'sortDirection': 'desc',
+            params = {'limit': min(10, limit - len(available)) if limit else 10,
+                      'sortKey': 'updated_at', 'sortDirection': 'desc',
                       'sourceKinds': ['cli', 'vscode', 'appServer'], 'useStateDbOnly': True}
             if cursor:
                 params['cursor'] = cursor
-            result = await self.bridge.codex.rpc('thread/list', params)
+            if search_term:
+                params['searchTerm'] = search_term
+            query = getattr(self.bridge.codex, 'read_only_rpc', self.bridge.codex.rpc)
+            result = await query('thread/list', params)
             for thread in result.get('data') or []:
                 if thread.get('canAcceptDirectInput') is False:
                     continue
                 self.remember_thread(thread)
                 if thread['id'] not in available:
                     available.append(thread['id'])
+                if limit and len(available) >= limit:
+                    return available
             cursor = result.get('nextCursor')
             if not cursor:
                 break
@@ -268,13 +301,20 @@ class Chat:
         async with self.attachment_lock:
             if automatic and (not self.active_host() or self.released(thread_id)):
                 return False
-            if not automatic:
-                for old in sorted(self.bridge.joined - {thread_id}):
-                    await self._release(old)
+            if thread_id in self.bridge.joined:
+                if not automatic:
+                    with self.store.db() as db:
+                        db.execute('DELETE FROM chat_released WHERE thread_id=?', (thread_id,))
+                return True
+            # Confirm the destination first. A rejected destination must leave
+            # the existing selection and subscription available for use.
             result = await self.bridge.codex.rpc('thread/resume', {'threadId': thread_id, 'excludeTurns': True})
             if result.get('thread'):
                 await attach_project(self.bridge.codex, result['thread'], self.cwd, self.bridge.config)
             self.bridge.joined.add(thread_id)
+            if not automatic:
+                for old in sorted(self.bridge.joined - {thread_id}):
+                    await self._release(old)
             with self.store.db() as db:
                 db.execute('DELETE FROM chat_released WHERE thread_id=?', (thread_id,))
             # Prime the watcher before starting a turn, so a fast question isn't skipped.
@@ -323,12 +363,18 @@ class Chat:
                     return
                 self.remember_thread(thread)
                 await self.join(ident)
-                self.select(ident)
+                self.select(ident, job['message_id'])
                 selected = self.session(ident)
                 self.enqueue(key, '✅ 已切到「' + display_name(selected['name']) + '」会话\n\n' + self.location(selected) + '\nID：' + ident + '\n之后的消息接着这里聊。')
                 return
         if action in ('new', 'switch', '会话列表'):
-            available = await self.refresh()
+            numbered_switch = action == 'switch' and list_number(argument) is not None
+            try:
+                available = await self.refresh(
+                    limit=10 if action == '会话列表' or numbered_switch else None,
+                    search_term=argument if action == 'new' or (action == 'switch' and not numbered_switch) else None)
+            except Exception as exc:
+                raise SessionLookupError() from exc
             with self.store.db() as db:
                 known = {r['thread_id']: dict(r) for r in db.execute('SELECT * FROM chat_sessions')}
                 sessions = [known[ident] for ident in available]
@@ -343,7 +389,7 @@ class Chat:
                     db.execute('INSERT OR REPLACE INTO chat_lists VALUES(?,?,?)',
                                (key, self.bridge.config['chat_id'], json.dumps([s['thread_id'] for s in shown])))
                 text = '📋 当前主机会话列表 · 全部项目\n\n' + '\n\n'.join(lines) if lines else '📋 当前主机会话列表 · 全部项目\n\n暂无会话。\n发送「新建会话 名称」即可开始。'
-                if len(sessions) > 10:
+                if len(sessions) >= 10:
                     text += '\n\n已显示最近 10 个会话。'
                 if lines:
                     text += '\n\n发送「切换 2」切换会话。\n序号对应这份列表，10分钟内有效；新增会话后请刷新列表。\n也支持完整名称或完整会话 ID。'
@@ -359,7 +405,7 @@ class Chat:
                 self.remember(thread_id, argument)
                 await self.bridge.codex.rpc('thread/name/set', {'threadId': thread_id, 'name': argument})
                 await self.join(thread_id)
-                self.select(thread_id)
+                self.select(thread_id, job['message_id'])
                 self.enqueue(key, '✅ 已新建并切到\n\n「' + display_name(argument) + '」\n项目：{project}\n\n直接发消息，开始这个任务。'.replace('{project}', self.project_name))
                 return
             number = list_number(argument)
@@ -389,9 +435,18 @@ class Chat:
                 self.enqueue(key, '💡 没有找到唯一的同名会话\n\n发送「会话列表」，再按序号切换。')
                 return
             await self.join(matches[0]['thread_id'])
-            self.select(matches[0]['thread_id'])
+            self.select(matches[0]['thread_id'], job['message_id'])
             self.enqueue(key, '✅ 已切到「' + display_name(matches[0]['name']) + '」会话\n\n' + self.location(matches[0]) + '\n之后的消息接着这里聊。')
             return
+        with self.store.db() as db:
+            dependency = db.execute('SELECT d.selection_job_id,r.thread_id FROM chat_job_dependencies d '
+                                    'LEFT JOIN chat_selection_results r ON r.message_id=d.selection_job_id '
+                                    'WHERE d.message_id=?', (job['message_id'],)).fetchone()
+        if dependency:
+            if not dependency['thread_id']:
+                self.enqueue(key, '上一条会话切换或新建未完成，这条消息未发送。\n\n请先确认「当前会话」，切换成功后再发送消息。')
+                return
+            job['thread_id'] = dependency['thread_id']
         current = self.session(job['thread_id']) if job.get('thread_id') else await self.default_session()
         thread_id = current['thread_id']
         with self.store.db() as db:
@@ -438,12 +493,31 @@ class Chat:
                     await self.execute(job)
                     state = 'done'
                 except Exception as exc:
-                    state = 'uncertain'
-                    self.enqueue('ack:' + job['message_id'],
-                                 '⚠️ 请求未确认\n\n消息已保留，未自动重试。\n请到 Codex 桌面核对后再继续。')
+                    if isinstance(exc, RpcError) and exc.reason == 'active_writer':
+                        state = 'failed'
+                        current = self.current()
+                        self.enqueue('ack:' + job['message_id'],
+                                     '该会话正由 Codex 桌面或其他客户端占用，本次操作未执行。\n\n' +
+                                     ('当前仍是「' + display_name(current['name']) + '」。\n' if current else '') +
+                                     '请在原客户端释放该会话后重试。')
+                    elif isinstance(exc, SessionLookupError):
+                        state = 'failed'
+                        action = command(job['content'])[0]
+                        current = self.current()
+                        text = ('暂时无法读取会话列表。\n\n请稍后再发送「会话列表」，无需到桌面确认。'
+                                if action == '会话列表' else
+                                '会话查询失败，本次' + ('新建' if action == 'new' else '切换') + '未执行。\n\n' +
+                                ('当前仍是「' + display_name(current['name']) + '」。\n' if current else '') +
+                                '请稍后重试，无需到桌面确认。')
+                        self.enqueue('ack:' + job['message_id'], text)
+                    else:
+                        state = 'uncertain'
+                        self.enqueue('ack:' + job['message_id'],
+                                     '⚠️ 请求未确认\n\n消息已保留，未自动重试。\n请到 Codex 桌面核对后再继续。')
                     # Do not log message content or exception details containing user data.
                     from .service import log
-                    log.warning('chat_request_error=%s', type(exc).__name__)
+                    log.warning('chat_request_error=%s action=%s',
+                                type(exc.__cause__ or exc).__name__, command(job['content'])[0])
                 with self.store.db() as db:
                     db.execute('UPDATE chat_jobs SET state=? WHERE message_id=?', (state, job['message_id']))
         self.schedule_flush()

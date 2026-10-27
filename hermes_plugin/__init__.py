@@ -16,6 +16,9 @@ COMMAND=re.compile(r'^\s*(?:/?codex\s+)?C[0-9a-f]{6}\s+\S',re.I)
 OUTBOUND = {}
 OUTBOUND_LOCK = asyncio.Lock()
 SIMPLIFIED_CHINESE = OpenCC('t2s')
+# Host switches wait for Codex subscription changes before acknowledging intake.
+# Leave time for those RPCs while staying below Hermes' default 30s hook limit.
+CHAT_TIMEOUT = 15
 
 
 def channel_dir(platform):
@@ -174,7 +177,7 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
             return {'action':'skip', 'reason':reason+'-chat-transcription-failed'}
     if images or not COMMAND.match(text):
         try:
-            async with aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(directory/'bridge.sock')),timeout=aiohttp.ClientTimeout(total=8 if images else 1)) as session:
+            async with asyncio.timeout(CHAT_TIMEOUT), aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(directory/'bridge.sock')),timeout=aiohttp.ClientTimeout(total=CHAT_TIMEOUT)) as session:
                 async with session.post('http://localhost/channel-ready',json={'platform':platform,'chat_id':source.chat_id,'user_id':source.user_id}) as response:
                     await response.read()
                 if config.get('chat_enabled', False):
@@ -186,6 +189,13 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
                         result = await response.json()
                         if result.get('handled'):
                             return {'action':'skip','reason':reason+'-chat'}
+        except asyncio.TimeoutError:
+            # A missing HTTP acknowledgement does not mean the operation failed.
+            # The bridge can still finish and deliver its normal result; never replay it.
+            if config.get('chat_enabled', False):
+                await feedback(gateway._intake_adapter_for(source), source,
+                               '响应较慢，正在等待处理确认，请留意后续结果，暂勿重复发送。', platform, event.message_id)
+                return {'action':'skip','reason':reason+'-chat-pending'}
         except Exception:
             # Once chat routing is enabled, failures must not silently execute via Hermes.
             if config.get('chat_enabled', False):

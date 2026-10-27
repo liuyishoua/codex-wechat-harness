@@ -9,6 +9,9 @@ class RpcError(RuntimeError):
     def __init__(self, error):
         self.code = error.get('code')
         self.method = None
+        # Keep only a known category; never retain/log arbitrary server messages.
+        self.reason = ('active_writer' if 'already has an active writer' in str(error.get('message', ''))
+                       else None)
         super().__init__('Codex RPC 被拒绝，code='+str(self.code))
 
 
@@ -61,6 +64,21 @@ class Codex:
                 raise
         finally:
             self.pending.pop(ident, None)
+
+    async def read_only_rpc(self, method, params):
+        # Only explicitly read-only calls may be retried after an unknown result.
+        if method != 'thread/list':
+            raise ValueError('该 RPC 不支持自动重试')
+        try:
+            return await self.rpc(method, params)
+        except (TimeoutError, ConnectionError, OSError, aiohttp.ClientError):
+            # Keep the shared event connection and any in-flight writes intact.
+            fallback = Codex(self.path)
+            try:
+                await fallback.connect()
+                return await fallback.rpc(method, params)
+            finally:
+                await fallback.close()
 
     async def latest(self, thread_id):
         result = await self.rpc('thread/turns/list', {'threadId': thread_id, 'limit': 1,
