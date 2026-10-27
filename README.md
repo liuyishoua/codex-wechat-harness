@@ -1,5 +1,7 @@
 # Codex ↔ Hermes 微信桥接
 
+> 文档中的 example.com 域名、192.0.2.* 地址、/opt/operator 路径及 20000 段端口均为示例，请按实际部署配置替换。私有账号配置与运行数据不随源码提交。
+
 把 **Hermes 已绑定的微信**接到 **现有 Codex App Server 会话**：微信发文字、图片和语音，Codex 在同一任务里处理，再把结果发回微信。支持会话切换、图片双向传递和需要用户回答时的微信通知。
 
 Hermes 管微信登录与收发；本项目只做桥接。不会另起 Hermes 模型任务，不直接轮询微信 getupdates，不替换 Codex 的模型或权限配置。
@@ -149,11 +151,11 @@ journalctl --user -u codex-wechat-harness -n 30 --no-pager
     "id": "mac-mini",
     "name": "Mac mini",
     "aliases": ["leomac-mini"],
-    "codex_socket": "/home/ubuntu/leo-project/codex-wechat/.local/hosts/mac-mini/control.sock",
-    "project_cwd": "/Users/leo/leo-project",
-    "ssh_target": "leo@100.117.21.117",
-    "ssh_identity": "/home/ubuntu/.ssh/id_ed25519",
-    "remote_image_dir": "/Users/leo/.codex/wechat-images"
+    "codex_socket": "/opt/operator/leo-project/codex-wechat/.local/hosts/mac-mini/control.sock",
+    "project_cwd": "/Users/operator/leo-project",
+    "ssh_target": "leo@192.0.2.11",
+    "ssh_identity": "/opt/operator/.ssh/id_ed25519",
+    "remote_image_dir": "/Users/operator/.codex/wechat-images"
   }]
 }
 ```
