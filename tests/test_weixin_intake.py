@@ -89,3 +89,24 @@ def test_real_weixin_adapter_keeps_distinct_identical_owner_messages(tmp_path):
         assert sum(event.message_id is None for event in received) == 1
     try:asyncio.run(check())
     finally:restore()
+
+
+def test_plugin_registration_loads_guard_without_bridge_package_import(tmp_path, monkeypatch):
+    import builtins
+    from test_qq import plugin_at
+    plugin = plugin_at(tmp_path, monkeypatch)
+    original_import = builtins.__import__
+    def isolated_import(name, *args, **kwargs):
+        if name == 'harness' or name.startswith('harness.'):
+            raise ModuleNotFoundError("No module named 'harness'")
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', isolated_import)
+    pytest.importorskip('gateway.platforms.weixin')
+    callbacks=[];hooks=[]
+    ctx=SimpleNamespace(on_unload=callbacks.append,register_hook=lambda *args:hooks.append(args))
+    try:
+        plugin.register(ctx)
+        assert hooks == [('pre_gateway_dispatch',plugin.dispatch)]
+        assert len(callbacks)==2
+    finally:
+        for callback in callbacks:callback()

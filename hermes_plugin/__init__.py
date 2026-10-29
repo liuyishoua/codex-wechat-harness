@@ -222,7 +222,9 @@ async def dispatch(event, gateway, session_store=None, **kwargs):
     return {'action':'skip','reason':reason+'-harness'}
 
 def register(ctx):
-    from harness.weixin_intake import install
+    # Hermes discovers this symlinked plugin without installing the bridge package.
+    from runpy import run_path
+    install = run_path(str(Path(__file__).resolve().parents[1] / 'harness/weixin_intake.py'))['install']
     ctx.on_unload(install(channel_dir('weixin') / 'config.json'))
     ctx.register_hook('pre_gateway_dispatch',dispatch)
     ctx.on_unload(unload)
